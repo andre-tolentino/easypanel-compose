@@ -219,7 +219,39 @@ services:
       SEED_SELF_HOST: true
       RUN_JANITOR: true
 
-  # To use S3 backed storage: docker compose -f docker-compose.yml -f docker-compose.s3.yml up
+  # MinIO - S3-compatible storage server
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-supa-storage}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-secret1234}
+    command: server --console-address ":9001" /data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://minio:9000/minio/health/live"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - minio-data:/data
+
+  # Create MinIO bucket on startup
+  minio-createbucket:
+    image: minio/mc
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set supa-minio http://minio:9000 ${MINIO_ROOT_USER:-supa-storage} ${MINIO_ROOT_PASSWORD:-secret1234};
+      /usr/bin/mc mb --ignore-existing supa-minio/${GLOBAL_S3_BUCKET:-supabase};
+      exit 0;
+      "
+
   storage:
     image: supabase/storage-api:v1.22.17
     restart: unless-stopped
@@ -246,6 +278,8 @@ services:
         condition: service_started
       imgproxy:
         condition: service_started
+      minio:
+        condition: service_healthy
     environment:
       ANON_KEY: ${ANON_KEY}
       SERVICE_KEY: ${SERVICE_ROLE_KEY}
@@ -253,12 +287,17 @@ services:
       PGRST_JWT_SECRET: ${JWT_SECRET}
       DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       FILE_SIZE_LIMIT: 52428800
-      STORAGE_BACKEND: file
+      STORAGE_BACKEND: s3
+      GLOBAL_S3_BUCKET: ${GLOBAL_S3_BUCKET:-supabase}
+      GLOBAL_S3_ENDPOINT: http://minio:9000
+      GLOBAL_S3_PROTOCOL: http
+      GLOBAL_S3_FORCE_PATH_STYLE: true
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-supa-storage}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-secret1234}
+      AWS_DEFAULT_REGION: ${REGION:-us-east-1}
       FILE_STORAGE_BACKEND_PATH: /var/lib/storage
       TENANT_ID: stub
-      # TODO: https://github.com/supabase/storage-api/issues/55
-      REGION: stub
-      GLOBAL_S3_BUCKET: stub
+      REGION: ${REGION:-us-east-1}
       ENABLE_IMAGE_TRANSFORMATION: "true"
       IMGPROXY_URL: http://imgproxy:5001
 
@@ -430,6 +469,9 @@ services:
   supavisor:
     image: supabase/supavisor:2.5.1
     restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POOLER_PROXY_PORT_TRANSACTION:-6543}:6543"
     volumes:
       - ./volumes/pooler/pooler.exs:/etc/pooler/pooler.exs:ro,z
     healthcheck:
@@ -478,3 +520,4 @@ services:
 
 volumes:
   db-config:
+  minio-data:
